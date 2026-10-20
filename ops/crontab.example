@@ -1,0 +1,17 @@
+# Illustrative schedule: only reconcile-payments.ts ships in this reference repo;
+# the other job scripts existed in production and are named here for shape.
+# Every job: (1) runs from the IMMUTABLE release, never the dev checkout,
+# (2) is wrapped so a non-zero exit pages someone, (3) appends to one log.
+# CRON_ALERT_TO is set in the crontab environment, not in the repo.
+SHELL=/bin/bash
+APP_ROOT=/srv/studio-os/app
+R=/srv/studio-os/releases/current
+W=/srv/studio-os/app/ops/cron-with-alert.sh
+L=/srv/studio-os/app/logs
+
+*/5 * * * *  $W reconcile-payments   "cd $R && npx tsx scripts/reconcile-payments.ts"   >> $L/reconcile.log 2>&1
+*/5 * * * *  $W workflow-processor   "cd $R && npx tsx scripts/process-workflows.ts"    >> $L/workflows.log 2>&1
+0 9 * * *    $W process-billing      "cd $R && npx tsx scripts/process-billing.ts"      >> $L/billing.log 2>&1
+*/30 * * * * $W mark-no-shows        "cd $R && npx tsx scripts/mark-no-shows.ts"        >> $L/no-shows.log 2>&1
+15 3 * * *   $W cleanup-rate-limits  "cd $R && npx tsx scripts/cleanup-rate-limits.ts"  >> $L/maintenance.log 2>&1
+12 * * * *  CRON_ALERT_MIN_CONSECUTIVE=2 $W calendar-feed-sync "cd $R && npx tsx scripts/calendar-sync.ts" >> $L/calendar.log 2>&1

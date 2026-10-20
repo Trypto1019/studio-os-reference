@@ -1,0 +1,14 @@
+title = "studio-os-reference gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholders and test-only fixtures"
+paths = [
+  '''package-lock\.json''',
+]
+regexes = [
+  '''your-[a-z0-9-]+-here''',
+  '''[a-z-]+-not-real''',
+]

@@ -1,0 +1,9 @@
+[Unit]
+Description=Alert on failed unit %i
+
+[Service]
+Type=oneshot
+User=studio-os
+EnvironmentFile=/etc/studio-os/alerts.env
+Environment=APP_ROOT=/srv/studio-os/app
+ExecStart=/srv/studio-os/app/ops/unit-failure-report.sh %i

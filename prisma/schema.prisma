@@ -1,0 +1,701 @@
+// Trimmed reference schema (27 models). The production schema had 85 models;
+// AI-agent, outreach and partner-specific models are omitted here.
+//
+// Not expressible in Prisma and applied as raw SQL (prisma/sql/):
+//   - partial unique index on Payment.idempotencyKey WHERE NOT NULL
+//   - descending index on RateLimitEvent(scope, key, createdAt DESC) is below
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// People
+// ---------------------------------------------------------------------------
+
+model Customer {
+  id                 String          @id @default(uuid())
+  firstName          String
+  lastName           String
+  email              String?         @unique
+  phone              String?         @unique
+  pipelineStage      PipelineStage   @default(new_lead)
+  // Migration cutover: which system drives this customer's renewals.
+  billingOwner       BillingOwner    @default(studio_os)
+  chargeRail         ChargeRail      @default(NMI)
+  nmiCustomerVaultId String?
+  stripeCustomerId   String?         @unique
+  cardLastFour       String?
+  smsOptIn           Boolean         @default(true)
+  smsOptOut          Boolean         @default(false)
+  smsOptOutAt        DateTime?
+  emailOptOut        Boolean         @default(false)
+  lastRespondedAt    DateTime?
+  // Identity in the legacy booking system, kept for mirror-mode matching.
+  legacyCustomerId   String?         @unique
+  notes              String?
+  passwordHash       String?
+  mustResetPassword  Boolean         @default(false)
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  assignedUserId     String?
+  assignedUser       User?           @relation("AssignedCustomers", fields: [assignedUserId], references: [id])
+
+  sessions           Session[]
+  memberships        Membership[]
+  packages           CustomerPackage[]
+  payments           Payment[]
+  billingEvents      BillingEvent[]
+  fees               Fee[]
+  workflowInstances  WorkflowInstance[]
+  staffTasks         StaffTask[]
+  consentEvents      ConsentEvent[]
+  pendingIntents     PendingIntent[]
+  communications     Communication[]
+  sharedMemberships  SharedMembershipMember[]
+
+  @@index([pipelineStage])
+  @@index([billingOwner])
+}
+
+model User {
+  id                 String       @id @default(uuid())
+  name               String
+  email              String       @unique
+  passwordHash       String
+  role               UserRole
+  isActive           Boolean      @default(true)
+  mustChangePassword Boolean      @default(false)
+  lastLoginAt        DateTime?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  assignedCustomers  Customer[]   @relation("AssignedCustomers")
+  auditLogs          AuditLog[]
+  payments           Payment[]    @relation("UserPayments")
+  assignedTasks      StaffTask[]  @relation("AssignedTasks")
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling
+// ---------------------------------------------------------------------------
+
+model Room {
+  id        String    @id @default(uuid())
+  name      String    @unique
+  capacity  Int       @default(1)
+  isActive  Boolean   @default(true)
+  sessions  Session[]
+}
+
+model Session {
+  id            String        @id @default(uuid())
+  customerId    String
+  roomId        String
+  date          DateTime      @db.Date
+  startTime     String        // "HH:mm" in APP_TIMEZONE
+  durationMin   Int           @default(60)
+  status        SessionStatus @default(booked)
+  needsPayment  Boolean       @default(false)
+  creditSource  String?
+  legacyVisitId String?       @unique
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  customer      Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  room          Room          @relation(fields: [roomId], references: [id])
+  fees          Fee[]
+
+  @@index([customerId, date])
+  @@index([roomId, date, startTime])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Catalog, memberships, credits
+// ---------------------------------------------------------------------------
+
+model Product {
+  id               String            @id @default(uuid())
+  name             String            @unique
+  type             ProductType
+  priceCents       Int
+  creditsPerCycle  Int?
+  validDays        Int?
+  // Optional price step-down schedule: [{uptoCycle, priceCents}, ...]
+  priceTiers       Json?
+  isActive         Boolean           @default(true)
+  memberships      Membership[]
+  packages         CustomerPackage[]
+  sharedMemberships SharedMembership[]
+}
+
+model Membership {
+  id                    String           @id @default(uuid())
+  customerId            String
+  productId             String
+  status                MembershipStatus
+  billingPriceCents     Int
+  priceLocked           Boolean          @default(false)
+  billingIntervalMonths Int              @default(1)
+  cyclesBilled          Int              @default(0)
+  currentPeriodStart    DateTime
+  currentPeriodEnd      DateTime
+  // Non-null iff the row will be charged again.
+  nextBillingDate       DateTime?
+  billingFailureCount   Int              @default(0)
+  billingFailureReason  String?
+  lastBilledAt          DateTime?
+  cancelledAt           DateTime?
+  legacyMembershipId    String?          @unique
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+  customer              Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  product               Product          @relation(fields: [productId], references: [id])
+  billingEvents         BillingEvent[]
+
+  @@index([customerId])
+  @@index([status, nextBillingDate])
+}
+
+model SharedMembership {
+  id              String                   @id @default(uuid())
+  productId       String
+  status          MembershipStatus
+  nextBillingDate DateTime?
+  createdAt       DateTime                 @default(now())
+  product         Product                  @relation(fields: [productId], references: [id])
+  members         SharedMembershipMember[]
+  payments        Payment[]
+}
+
+model SharedMembershipMember {
+  id                 String           @id @default(uuid())
+  sharedMembershipId String
+  customerId         String
+  isBillingPrimary   Boolean          @default(false)
+  leftAt             DateTime?
+  sharedMembership   SharedMembership @relation(fields: [sharedMembershipId], references: [id], onDelete: Cascade)
+  customer           Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([sharedMembershipId, customerId])
+}
+
+model CustomerPackage {
+  id               String       @id @default(uuid())
+  customerId       String
+  productId        String
+  source           String       @default("purchase") // "purchase" | "winback_offer" | "comp"
+  creditsTotal     Int
+  creditsRemaining Int
+  expiresAt        DateTime
+  paymentId        String?      @unique
+  createdAt        DateTime     @default(now())
+  customer         Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  product          Product      @relation(fields: [productId], references: [id])
+  ledger           CreditLedger[]
+
+  @@index([customerId, expiresAt])
+}
+
+model CreditLedger {
+  id         String           @id @default(uuid())
+  packageId  String?
+  sessionId  String?
+  delta      Int
+  sourceType CreditSourceType
+  createdAt  DateTime         @default(now())
+  package    CustomerPackage? @relation(fields: [packageId], references: [id])
+
+  @@index([sessionId])
+}
+
+model Fee {
+  id          String    @id @default(uuid())
+  customerId  String
+  sessionId   String
+  type        FeeType
+  amountCents Int
+  status      FeeStatus @default(PENDING)
+  paymentId   String?   @unique
+  createdAt   DateTime  @default(now())
+  customer    Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  session     Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  payment     Payment?  @relation(fields: [paymentId], references: [id])
+}
+
+// ---------------------------------------------------------------------------
+// Payments (see lib/payments/* and docs/adr/0001)
+// ---------------------------------------------------------------------------
+
+model Payment {
+  id                     String             @id @default(uuid())
+  customerId             String
+  amountCents            Int                // negative for refunds
+  type                   PaymentType
+  status                 PaymentStatus
+  gateway                PaymentGateway     @default(NMI)
+  gatewayTransactionId   String?
+  // Durability columns
+  chargeStatus           ChargeStatus?
+  fulfillmentStatus      FulfillmentStatus?
+  paymentType            PaymentFlow?
+  idempotencyKey         String?            // partial unique index, prisma/sql/0001
+  requestHash            String?            // sha256 of the canonical request
+  contextJson            Json?
+  gatewayRequestedAt     DateTime?
+  gatewayRespondedAt     DateTime?
+  failureReasonCode      String?
+  failureReasonText      String?
+  gatewayDeclineDetail   Json?
+  fulfilledAt            DateTime?
+  reconciliationAttempts Int                @default(0)
+  // Refund chain
+  parentPaymentId        String?
+  parentPayment          Payment?           @relation("RefundChain", fields: [parentPaymentId], references: [id], onDelete: SetNull)
+  childRefunds           Payment[]          @relation("RefundChain")
+  sharedMembershipId     String?
+  sharedMembership       SharedMembership?  @relation(fields: [sharedMembershipId], references: [id])
+  legacyPaymentId        String?            @unique
+  description            String?
+  cardLastFour           String?
+  createdByUserId        String?
+  createdBy              User?              @relation("UserPayments", fields: [createdByUserId], references: [id])
+  processedAt            DateTime?
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+  customer               Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  fee                    Fee?
+
+  @@index([customerId])
+  @@index([chargeStatus, createdAt])
+  @@index([chargeStatus, fulfillmentStatus])
+  @@index([gateway, gatewayTransactionId])
+  @@index([parentPaymentId])
+}
+
+model BillingEvent {
+  id                   String           @id @default(uuid())
+  customerId           String
+  membershipId         String
+  type                 BillingEventType
+  amountCents          Int
+  gateway              PaymentGateway   @default(NMI)
+  gatewayTransactionId String?
+  failureReason        String?
+  createdAt            DateTime         @default(now())
+  customer             Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  membership           Membership       @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+  @@index([membershipId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Automation
+// ---------------------------------------------------------------------------
+
+model WorkflowTemplate {
+  id           String             @id @default(uuid())
+  name         String             @unique
+  description  String?
+  triggerStage PipelineStage
+  solicitation Boolean            @default(false) // narrower send window
+  isActive     Boolean            @default(true)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  steps        WorkflowStep[]
+  instances    WorkflowInstance[]
+}
+
+model WorkflowStep {
+  id                 String                  @id @default(uuid())
+  workflowTemplateId String
+  stepOrder          Int
+  delayMinutes       Int
+  anchor             WorkflowStepAnchor?
+  channel            WorkflowChannel
+  subject            String?
+  body               String
+  isActive           Boolean                 @default(true)
+  workflowTemplate   WorkflowTemplate        @relation(fields: [workflowTemplateId], references: [id], onDelete: Cascade)
+  executions         WorkflowStepExecution[]
+
+  @@index([workflowTemplateId, stepOrder])
+}
+
+model WorkflowInstance {
+  id                 String                  @id @default(uuid())
+  workflowTemplateId String
+  customerId         String
+  status             WorkflowInstanceStatus
+  pausedReason       String?
+  resumeAt           DateTime?
+  startedAt          DateTime                @default(now())
+  completedAt        DateTime?
+  cancelledAt        DateTime?
+  workflowTemplate   WorkflowTemplate        @relation(fields: [workflowTemplateId], references: [id], onDelete: Cascade)
+  customer           Customer                @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  executions         WorkflowStepExecution[]
+
+  @@index([customerId, status])
+  @@index([status, resumeAt])
+}
+
+model WorkflowStepExecution {
+  id                 String                  @id @default(uuid())
+  workflowInstanceId String
+  workflowStepId     String
+  channel            WorkflowChannel
+  scheduledAt        DateTime
+  executedAt         DateTime?
+  status             WorkflowExecutionStatus
+  messageContent     String?
+  externalId         String?
+  errorMessage       String?
+  workflowInstance   WorkflowInstance        @relation(fields: [workflowInstanceId], references: [id], onDelete: Cascade)
+  workflowStep       WorkflowStep            @relation(fields: [workflowStepId], references: [id], onDelete: Cascade)
+
+  @@index([status, scheduledAt])
+  @@index([workflowInstanceId])
+}
+
+model StaffTask {
+  id           String          @id @default(uuid())
+  customerId   String?
+  assignedTo   String?
+  type         StaffTaskType
+  title        String
+  description  String?
+  status       StaffTaskStatus @default(pending)
+  dueAt        DateTime
+  completedAt  DateTime?
+  createdAt    DateTime        @default(now())
+  customer     Customer?       @relation(fields: [customerId], references: [id])
+  assignedUser User?           @relation("AssignedTasks", fields: [assignedTo], references: [id])
+
+  @@index([status, dueAt])
+}
+
+model PendingIntent {
+  id         String            @id @default(uuid())
+  customerId String
+  intentType PendingIntentType
+  payload    Json              // e.g. win-back offer payload (lib/winback/offer-payload.ts)
+  status     String            @default("OPEN")
+  expiresAt  DateTime
+  resolvedAt DateTime?
+  createdAt  DateTime          @default(now())
+  customer   Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, status])
+}
+
+model Communication {
+  id         String                 @id @default(uuid())
+  customerId String
+  type       CommunicationType
+  direction  CommunicationDirection
+  body       String?
+  externalId String?                // provider message id (delivery webhooks match on it)
+  status     String?
+  createdAt  DateTime               @default(now())
+  customer   Customer               @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([externalId])
+  @@index([customerId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Consent (append-only evidence + suppression list)
+// ---------------------------------------------------------------------------
+
+model ConsentEvent {
+  id                 String              @id @default(uuid())
+  customerId         String
+  channel            ConsentEventChannel
+  granted            Boolean
+  source             String
+  disclosureVersion  String              @db.VarChar(64)
+  disclosureTextHash String              @db.Char(64)
+  priorState         Json
+  currentState       Json
+  ip                 String?             @db.VarChar(64)
+  userAgent          String?             @db.VarChar(512)
+  timestamp          DateTime            @default(now())
+  customer           Customer            @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  @@index([customerId, channel, timestamp])
+}
+
+model SmsSuppression {
+  id        String   @id @default(uuid())
+  phone     String   @unique // normalized 10-digit
+  reason    String   // "carrier_stop" | "customer_sms_opt_out"
+  createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Platform
+// ---------------------------------------------------------------------------
+
+model RateLimitEvent {
+  id        String         @id @default(uuid())
+  scope     RateLimitScope
+  key       String
+  blocked   Boolean        @default(false)
+  ipAddress String?
+  details   Json?
+  createdAt DateTime       @default(now())
+
+  @@index([createdAt])
+  @@index([scope, key, createdAt(sort: Desc)])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  action     String
+  entityType String
+  entityId   String
+  details    Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+  user       User?    @relation(fields: [userId], references: [id])
+
+  @@index([action, entityId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+model Setting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Migration (mirror mode, see migration/mirror-mode.md)
+// ---------------------------------------------------------------------------
+
+model MirrorSyncState {
+  id           String    @id @default(uuid())
+  dataType     String    @unique
+  lastSyncedAt DateTime?
+  syncCount    Int       @default(0)
+  lastErrorAt  DateTime?
+  lastErrorMsg String?
+  updatedAt    DateTime  @updatedAt
+}
+
+model MirrorConflict {
+  id              String         @id @default(uuid())
+  entityType      String
+  entityId        String
+  field           String
+  legacySnapshot  Json
+  currentSnapshot Json
+  status          ConflictStatus @default(OPEN)
+  notes           String?
+  resolvedBy      String?
+  resolvedAt      DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@unique([entityType, entityId, field])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  owner
+  manager
+  staff
+}
+
+enum PipelineStage {
+  new_lead
+  scheduled
+  showed
+  member
+  closed
+}
+
+enum BillingOwner {
+  legacy_vendor
+  studio_os
+}
+
+enum ChargeRail {
+  NMI
+  STRIPE
+}
+
+enum SessionStatus {
+  booked
+  checked_in
+  completed
+  cancelled
+  no_show
+}
+
+enum ProductType {
+  membership
+  package
+  single_session
+  retail
+}
+
+enum MembershipStatus {
+  ACTIVE
+  PAST_DUE
+  PAUSED
+  CANCELLED
+}
+
+enum CreditSourceType {
+  MEMBERSHIP
+  PACKAGE
+  COMP
+}
+
+enum FeeType {
+  NO_SHOW
+  LATE_CANCEL
+}
+
+enum FeeStatus {
+  PENDING
+  PAID
+  WAIVED
+  FAILED
+}
+
+enum PaymentType {
+  charge
+  refund
+}
+
+enum PaymentStatus {
+  pending
+  completed
+  failed
+}
+
+enum PaymentGateway {
+  NMI
+  STRIPE
+  CASH
+  COMP
+}
+
+enum ChargeStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  UNKNOWN
+  REFUNDED
+  REVERSED
+}
+
+enum FulfillmentStatus {
+  NOT_STARTED
+  APPLIED
+  FAILED
+}
+
+enum PaymentFlow {
+  MEMBERSHIP_RENEWAL
+  PACKAGE_PURCHASE
+  MANUAL_CHARGE
+  NO_SHOW_FEE
+}
+
+enum BillingEventType {
+  CHARGE_SUCCESS
+  CHARGE_FAILED
+  RETRY
+}
+
+enum WorkflowChannel {
+  SMS
+  EMAIL
+  CALL_TASK
+  STAGE_CHANGE
+}
+
+enum WorkflowStepAnchor {
+  ENROLLMENT
+  APPOINTMENT
+}
+
+enum WorkflowInstanceStatus {
+  active
+  paused
+  completed
+  cancelled
+}
+
+enum WorkflowExecutionStatus {
+  pending
+  sent
+  failed
+  skipped
+}
+
+enum StaffTaskType {
+  CALL
+  EMAIL
+  SMS
+  OTHER
+}
+
+enum StaffTaskStatus {
+  pending
+  completed
+  cancelled
+}
+
+enum PendingIntentType {
+  BOOKING_REQUEST
+  GENERAL_FOLLOWUP
+}
+
+enum CommunicationType {
+  CALL
+  SMS
+  EMAIL
+}
+
+enum CommunicationDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum ConsentEventChannel {
+  email
+  sms
+  voice
+}
+
+enum RateLimitScope {
+  AUTH_LOGIN_STAFF
+  AUTH_LOGIN_CUSTOMER
+  AUTH_REGISTER_CUSTOMER
+  AUTH_FORGOT_PASSWORD
+  AUTH_RESET_PASSWORD
+  AUTH_MAGIC_LINK_REQUEST
+  BOOKING_PUBLIC_CREATE
+  BOOKING_AVAILABILITY
+}
+
+enum ConflictStatus {
+  OPEN
+  RESOLVED
+  IGNORED
+}

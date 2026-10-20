@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Prisma schema
+        run: npm run prisma:validate
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+      - name: Shell lint
+        run: bash -n ops/*.sh
+      - name: Unit tests (offline, no secrets)
+        run: npm test
+      - name: Demo smoke
+        run: npm run demo && npm run reconcile:demo && npm run mirror:demo
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,45 @@
+# Web tier. Hardened, non-root version of the production unit.
+# Install: copy to /etc/systemd/system/, then `bash ops/install-release-guards.sh`.
+[Unit]
+Description=Studio OS (Next.js web)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=studio-os
+Group=studio-os
+WorkingDirectory=/srv/studio-os/app
+EnvironmentFile=/etc/studio-os/app.env
+Environment=NODE_ENV=production
+Environment=APP_PORT=3000
+# Direct node invocation: one process layer, so MainPID is the server.
+ExecStart=/usr/bin/node node_modules/next/dist/bin/next start -p 3000
+# The Next server ignored SIGTERM under systemd (non-TTY), so stop always
+# ran to the timeout. 10s caps the restart gap; SIGKILL is safe for a
+# stateless HTTP tier whose writes are Serializable transactions.
+TimeoutStopSec=10
+Restart=always
+RestartSec=10
+
+# Resource limits
+MemoryMax=1G
+CPUQuota=80%
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/studio-os/app/logs /srv/studio-os/app/.next
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

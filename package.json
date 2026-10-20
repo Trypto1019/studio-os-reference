@@ -1,0 +1,25 @@
+{
+  "name": "studio-os-reference",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reference architecture extracted from a production studio CRM/booking/billing system: durable payments, reconciliation, dual-rail gateways, webhook security, RBAC, rate limiting, release engineering.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "demo": "tsx scripts/demo.ts",
+    "reconcile:demo": "tsx scripts/reconcile-payments.ts --demo",
+    "mirror:demo": "tsx scripts/mirror-sync.skeleton.ts --demo",
+    "prisma:validate": "prisma validate"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "prisma": "^6.19.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
